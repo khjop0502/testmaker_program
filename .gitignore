@@ -1,0 +1,44 @@
+# Python 캐시 / 바이트코드
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+
+# 가상환경
+.venv/
+venv/
+env/
+
+# 빌드/배포 산출물
+build/
+dist/
+*.spec
+
+# PyInstaller 로그/캐시
+*.manifest
+*.log
+*.toc
+
+# 엑셀/출력 결과물
+result/*
+*.xlsx
+*.xls
+
+# 시험지 소스
+src/*
+
+# 프로그램 실행 시 생성되는 메모리 파일
+schema_memory.txt
+
+# VSCode / IDE
+.vscode/
+.idea/
+*.iml
+
+# OS 특수파일
+.DS_Store
+Thumbs.db
+desktop.ini
+
+!.gitkeep
