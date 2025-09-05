@@ -77,10 +77,10 @@ def preview_df(df, max_cols=8, max_rows=6):
         max_len = len(str(col_title))
         for val in prev[c]:
             max_len = max(max_len, len(str(val)))
-        col_widths[c] = max_len + 2  # padding 2칸
+        col_widths[c] = max_len + 8  # padding 2칸
 
     # 헤더 출력
-    header = " | ".join(str(f"{i}:{c}").ljust(col_widths[c]) for i, c in enumerate(cols, start=1))
+    header = " | ".join(str(i).ljust(col_widths[c]) for i, c in enumerate(cols, start=1))
     print("\n[시트 미리보기] (최대 열:", max_cols, "/ 최대 행:", max_rows, ")")
     print(header)
     print("-" * len(header))
@@ -105,7 +105,7 @@ def read_raw_sheet(xlsx_path):
 def ask_schema_interactively(base_name, raw_df):
     """미리보기 보여주고 스키마를 사용자에게 물어서 반환"""
     preview_cols = preview_df(raw_df)  # 프리뷰 열 순서(원본 인덱스 0-based)
-    print("[스키마 선택]")
+    print("[설정 선택]")
     print("  A: 자동추정 (열 수로 3/4열 판단)")
     print("  3: 3열 (단원, 단어, 뜻)")
     print("  4: 4열 (분류, 단원, 단어, 뜻)")
@@ -248,10 +248,11 @@ def apply_schema(raw_df, schema):
 def get_schema_for_file(base_name, raw_df, memo, force_reset=False):
     if (not force_reset) and base_name in memo:
         sc = memo[base_name]
-        print(f"\n[스키마 불러옴] {base_name} → {sc['mode']} / use_cols={sc['use_cols']} / header_skip={sc['header_skip']} / mapping={sc['mapping']}")
+        preview_cols = preview_df(raw_df)
+        print(f"\n[설정 불러옴] {base_name} → {sc['mode']} / use_cols={sc['use_cols']} / header_skip={sc['header_skip']} / mapping={sc['mapping']}")
         return sc
 
-    print(f"\n[스키마 설정 필요] {base_name}")
+    print(f"\n[설정 필요] {base_name}")
     sc = ask_schema_interactively(base_name, raw_df)
     memo[base_name] = sc
     save_memory(memo)
@@ -280,10 +281,39 @@ def main():
 
             raw_df = read_raw_sheet(excel_path)
 
-            reset_ans = input("기존 스키마가 있으면 사용합니다. 재설정하려면 'R' 입력(그 외 엔터): ").strip().upper()
-            force_reset = (reset_ans == "R")
+            excel_path = os.path.join(BASE_DIR_SRC, files[sel - 1])
+            base_name = os.path.splitext(os.path.basename(excel_path))[0]
+            raw_df = read_raw_sheet(excel_path)
 
-            schema = get_schema_for_file(base_name, raw_df, memo, force_reset=force_reset)
+            # 저장된 설정 확인 → 있으면 먼저 보여주고, 그 다음 재설정 여부 묻기
+            saved = memo.get(base_name)
+            if saved:
+                
+                # 필요하면 프리뷰도 다시 보여줘서 참고하게
+                _ = preview_df(raw_df)
+
+                print(f"\n[저장된 설정 발견] {base_name}")
+                print(f" mode        : {saved.get('mode')}")
+                print(f" use_cols    : {saved.get('use_cols')}")
+                print(f" header_skip : {saved.get('header_skip')}")
+                print(f" mapping     : {saved.get('mapping')}")
+
+                ans = input("저장된 설정을 사용할까요? (엔터=예) / 재설정하려면 'R': ").strip().upper()
+                if ans == "R":
+                    print("\n[재설정 진행]")
+                    schema = ask_schema_interactively(base_name, raw_df)
+                    memo[base_name] = schema
+                    save_memory(memo)
+                    print("[저장 완료] schema_memory.txt 에 기록했습니다.\n")
+                else:
+                    schema = saved
+            else:
+                # 저장된 설정이 없으면 바로 설정 진입
+                print(f"\n[처음 사용하는 파일] {base_name} → 설정을 진행합니다.")
+                schema = ask_schema_interactively(base_name, raw_df)
+                memo[base_name] = schema
+                save_memory(memo)
+                print("[저장 완료] schema_memory.txt 에 기록했습니다.\n")
 
             day_input = input("DAY 번호 입력 (공백 구분, 예: 2 3 또는 4 7): ")
             days = parse_days(day_input)
