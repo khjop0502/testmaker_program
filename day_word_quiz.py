@@ -18,6 +18,27 @@ MEMO_PATH = "schema_memory.txt"  # JSON 저장 (파일명별 스키마 기억)
 os.makedirs(BASE_DIR_OUT, exist_ok=True)
 
 # -------------------- 유틸 --------------------
+
+try:
+    from wcwidth import wcswidth  # pip install wcwidth
+except Exception:
+    wcswidth = None
+
+def display_len(s: str) -> int:
+    s = "" if s is None else str(s)
+    if wcswidth:
+        w = wcswidth(s)
+        return w if w >= 0 else len(s)
+    # 폴백: 대략적인 2배폭 문자 보정 (간이)
+    # 전각/한글/한자 등은 2칸으로 추정
+    wide = sum(1 for ch in s if ord(ch) > 0x1100)
+    return len(s) + wide  # 대략 보정
+
+def ljust_display(s: str, width: int) -> str:
+    s = "" if s is None else str(s)
+    pad = max(0, width - display_len(s))
+    return s + (" " * pad)
+
 def normalize_cell(x):
     if pd.isna(x):
         return ""
@@ -69,38 +90,64 @@ def save_memory(memo):
         json.dump(memo, f, ensure_ascii=False, indent=2)
 
 # -------------------- 프리뷰 --------------------
-def preview_df(df, max_cols=8, max_rows=6):
+def preview_df(df, max_cols=8, max_rows=4, show_row_labels=True):
     """
-    앞부분 데이터가 있는 열/행을 간단 프리뷰 (열 맞춤 출력)
+    프리뷰 출력 (열 안내 1줄 + 데이터 최대 4행)
+    예:
+      열 1: 분류 | 열 2: 단원 | 열 3: 단어 | 열 4: 뜻
+      행 1 | 분류값 | 단원값 | 단어값 | 뜻값
+      행 2 | ...
     반환: 프리뷰에 사용한 원본 컬럼 인덱스 리스트(cols, 0-based)
     """
+    # 데이터 많은 열부터 상위 max_cols 선택
     nonnull_counts = df.notna().sum().sort_values(ascending=False)
-    cols = list(nonnull_counts.index[:max_cols])  # 원본 df의 컬럼 인덱스(0-based)
+    cols = list(nonnull_counts.index[:max_cols])  # 0-based 원본 인덱스
     prev = df[cols].head(max_rows).fillna("")
 
-    # 각 열의 최대 너비 계산
+    # 각 열의 "라벨" 추출 (앞쪽 3행 내 첫 비어있지 않은 값)
+    def first_nonempty(series):
+        for v in series:
+            s = "" if pd.isna(v) else str(v).strip()
+            if s:
+                return s
+        return ""
+    header_labels = []
+    for c in cols:
+        header_labels.append(first_nonempty(df[c].head(3)))
+
+    # 열 너비 계산: 라벨/데이터 모두 고려 + 최소 폭 14
     col_widths = {}
     for i, c in enumerate(cols, start=1):
-        col_title = f"{i}"
-        max_len = len(str(col_title))
+        label = f"열 {i}: {header_labels[i-1] or ''}".strip()
+        max_len = display_len(label)
         for val in prev[c]:
-            max_len = max(max_len, len(str(val)))
-        # 최소 폭 12, 여백 포함
-        col_widths[c] = max(max_len + 2, 12)
+            max_len = max(max_len, display_len(str(val)))
+        col_widths[c] = max(max_len + 2, 14)
 
-    # 헤더 출력 (1..N)
-    header = " | ".join(str(i).ljust(col_widths[c]) for i, c in enumerate(cols, start=1))
-    print("\n[시트 미리보기] (최대 열:", max_cols, "/ 최대 행:", max_rows, ")")
-    print(header)
-    print("-" * len(header))
+    # (선택) 행 라벨 폭
+    row_label_w = 6 if show_row_labels else 0  # "행 10" 도 들어가도록 6칸
 
-    # 데이터 행 출력
-    for _, row in prev.iterrows():
-        line = " | ".join(str(row[c]).ljust(col_widths[c]) for c in cols)
+    # 헤더 라인: "열 1: 분류 | 열 2: 단원 | ..."
+    header_line = (" " * row_label_w) + " | ".join(
+        ljust_display(f"열 {i}: {header_labels[i-1]}", col_widths[c])
+        for i, c in enumerate(cols, start=1)
+    )
+
+    print("\n[시트 미리보기]")
+    print(header_line)
+
+    # 데이터 행 출력 (최대 4행)
+    for r_idx, (_, row) in enumerate(prev.iterrows(), start=1):
+        row_prefix = (ljust_display(f"행 {r_idx}", row_label_w) + " | ") if show_row_labels else ""
+        line = row_prefix + " | ".join(
+            ljust_display(str(row[c]), col_widths[c]) for c in cols
+        )
         print(line)
     print()
 
     return cols
+
+
 
 def read_raw_sheet(xlsx_path):
     return pd.read_excel(xlsx_path, sheet_name=0, header=None)
