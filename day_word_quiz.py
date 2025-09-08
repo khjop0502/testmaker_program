@@ -5,13 +5,11 @@ import os
 import sys
 import json
 
+# 실행 위치 고정 (exe/py 공통)
 if getattr(sys, 'frozen', False):
-    # PyInstaller로 빌드된 exe
     os.chdir(os.path.dirname(sys.executable))
 else:
-    # 평소 .py 실행
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-
 
 BASE_DIR_SRC = "src"
 BASE_DIR_OUT = "result"
@@ -19,12 +17,19 @@ MEMO_PATH = "schema_memory.txt"  # JSON 저장 (파일명별 스키마 기억)
 
 os.makedirs(BASE_DIR_OUT, exist_ok=True)
 
+# -------------------- 유틸 --------------------
 def normalize_cell(x):
     if pd.isna(x):
         return ""
     s = str(x)
     s = re.sub(r'\s+', ' ', s.strip())
     return s
+
+def extract_day_number(x):
+    if pd.isna(x):
+        return None
+    m = re.search(r'\d+', str(x))
+    return int(m.group()) if m else None
 
 def list_source_files(src_dir):
     if not os.path.isdir(src_dir):
@@ -63,23 +68,27 @@ def save_memory(memo):
     with open(MEMO_PATH, "w", encoding="utf-8") as f:
         json.dump(memo, f, ensure_ascii=False, indent=2)
 
+# -------------------- 프리뷰 --------------------
 def preview_df(df, max_cols=8, max_rows=6):
-    """앞부분 데이터가 있는 열/행을 간단 프리뷰 (열 맞춤 출력)
-       반환: 프리뷰에 사용한 원본 컬럼 인덱스 리스트(cols)"""
+    """
+    앞부분 데이터가 있는 열/행을 간단 프리뷰 (열 맞춤 출력)
+    반환: 프리뷰에 사용한 원본 컬럼 인덱스 리스트(cols, 0-based)
+    """
     nonnull_counts = df.notna().sum().sort_values(ascending=False)
-    cols = list(nonnull_counts.index[:max_cols])  # ← 원본 df의 컬럼 인덱스(0-based)들
+    cols = list(nonnull_counts.index[:max_cols])  # 원본 df의 컬럼 인덱스(0-based)
     prev = df[cols].head(max_rows).fillna("")
 
-    # 각 열의 최대 너비 계산 (제목/데이터 모두 포함)
+    # 각 열의 최대 너비 계산
     col_widths = {}
     for i, c in enumerate(cols, start=1):
-        col_title = f"{i}:{c}"
+        col_title = f"{i}"
         max_len = len(str(col_title))
         for val in prev[c]:
             max_len = max(max_len, len(str(val)))
-        col_widths[c] = max_len + 8  # padding 2칸
+        # 최소 폭 12, 여백 포함
+        col_widths[c] = max(max_len + 2, 12)
 
-    # 헤더 출력
+    # 헤더 출력 (1..N)
     header = " | ".join(str(i).ljust(col_widths[c]) for i, c in enumerate(cols, start=1))
     print("\n[시트 미리보기] (최대 열:", max_cols, "/ 최대 행:", max_rows, ")")
     print(header)
@@ -91,62 +100,52 @@ def preview_df(df, max_cols=8, max_rows=6):
         print(line)
     print()
 
-    return cols  # ★ 프리뷰에 사용된 원본 컬럼 인덱스(0-based)를 반환
-
-
-def auto_guess_use_cols(df):
-    """열 개수를 자동 추정(4열 이상이면 4, 아니면 3) - 안전한 기본값"""
-    return 4 if df.shape[1] >= 4 else 3
+    return cols
 
 def read_raw_sheet(xlsx_path):
-    raw = pd.read_excel(xlsx_path, sheet_name=0, header=None)
-    return raw
+    return pd.read_excel(xlsx_path, sheet_name=0, header=None)
+
+# -------------------- 스키마 입력(수동만) --------------------
+def guess_defaults(preview_cols, raw_df):
+    """
+    프리뷰 열들(0-based)에 대해 첫 행의 텍스트로 기본 매핑 후보 추정.
+    반환: (분류, 단원, 단어, 뜻) → 프리뷰 번호(1..N) 또는 -1
+    """
+    header_texts = []
+    for c in preview_cols:
+        v = raw_df.iloc[0, c] if raw_df.shape[0] > 0 else ""
+        s = "" if pd.isna(v) else str(v).strip().lower()
+        header_texts.append(s)
+
+    b, d, w, m = -1, 1, 2, 3  # 기본값
+
+    for i, s in enumerate(header_texts, start=1):
+        if not s:
+            continue
+        if any(k in s for k in ["day", "단원"]):
+            d = i
+        if any(k in s for k in ["english", "영어", "단어"]):
+            w = i
+        if any(k in s for k in ["뜻", "의미", "mean"]):
+            m = i
+        if any(k in s for k in ["분류", "품사", "category", "pos"]):
+            b = i
+
+    return b, d, w, m
 
 def ask_schema_interactively(base_name, raw_df):
-    """미리보기 보여주고 스키마를 사용자에게 물어서 반환"""
-    preview_cols = preview_df(raw_df)  # 프리뷰 열 순서(원본 인덱스 0-based)
-    print("[설정 선택]")
-    print("  A: 자동추정 (열 수로 3/4열 판단)")
-    print("  3: 3열 (단원, 단어, 뜻)")
-    print("  4: 4열 (분류, 단원, 단어, 뜻)")
-    print("  M: 수동 매핑 (열 번호 직접 지정 - 프리뷰의 왼쪽 번호 1..N 기준)")
-    choice = input("선택 (A/3/4/M): ").strip().upper()
+    """
+    선택지 없이: 미리보기 → 헤더 스킵 여부 → 수동 매핑만 진행(프리뷰 번호 기반)
+    """
+    preview_cols = preview_df(raw_df)  # 0-based 원본 인덱스 리스트
 
-    def ask_header_skip():
-        ans = input("첫 행을 제목/머리글로 보고 건너뛸까요? (y/n, 기본 y): ").strip().lower()
-        return 1 if ans in ("", "y", "yes") else 0
+    ans = input("첫 행을 제목/머리글로 보고 건너뛸까요? (y/n, 기본 y): ").strip().lower()
+    header_skip = 1 if ans in ("", "y", "yes") else 0
 
-    if choice in ("", "A"):
-        use_cols = auto_guess_use_cols(raw_df)
-        header_skip = ask_header_skip()
-        schema = {"mode": "auto", "use_cols": use_cols, "header_skip": header_skip}
-        if use_cols == 3:
-            schema["mapping"] = {"분류": -1, "단원": 1, "단어": 2, "뜻": 3}
-        else:
-            schema["mapping"] = {"분류": 1, "단원": 2, "단어": 3, "뜻": 4}
-        return schema
+    def_b, def_d, def_w, def_m = guess_defaults(preview_cols, raw_df)
 
-    if choice == "3":
-        header_skip = ask_header_skip()
-        return {
-            "mode": "fixed3",
-            "use_cols": 3,
-            "header_skip": header_skip,
-            "mapping": {"분류": -1, "단원": 1, "단어": 2, "뜻": 3}
-        }
-
-    if choice == "4":
-        header_skip = ask_header_skip()
-        return {
-            "mode": "fixed4",
-            "use_cols": 4,
-            "header_skip": header_skip,
-            "mapping": {"분류": 1, "단원": 2, "단어": 3, "뜻": 4}
-        }
-
-    # 수동 매핑: 프리뷰 번호(1..len(preview_cols))를 받아 원본 인덱스(1-based)로 변환
-    print("\n[수동 매핑] 프리뷰의 왼쪽 번호(1..N)를 입력하세요. 해당 열이 없으면 -1")
-    header_skip = 1 if input("첫 행 스킵? (y=1 / n=0, 기본 y): ").strip().lower() in ("", "y") else 0
+    print("\n[열 매핑] 프리뷰의 왼쪽 번호(1..N)를 입력하세요. 해당 열이 없으면 -1")
+    print("예) 분류=-1, 단원=Day/단원/챕터, 단어=English/영어, 뜻=의미/한글")
 
     def ask_col(role, default_preview_pos):
         v = input(f"'{role}' 열 (프리뷰 번호, 없으면 -1, 기본 {default_preview_pos}): ").strip()
@@ -159,53 +158,86 @@ def ask_schema_interactively(base_name, raw_df):
                 sel = default_preview_pos
         if sel == -1:
             return -1
-        # 범위를 벗어나면 기본값
         if not (1 <= sel <= len(preview_cols)):
             return -1 if default_preview_pos == -1 else (preview_cols[default_preview_pos - 1] + 1)
-        # 프리뷰 → 원본(0-based) → 1-based로 변환
-        return preview_cols[sel - 1] + 1
+        return preview_cols[sel - 1] + 1  # 1-based 원본 인덱스
 
-    # 기본값 힌트: 흔한 순서(분류 없음, 단원은 'Day' 열, 단어=2, 뜻=3)를 프리뷰 번호로 가정
-    # 안전하게 기본 -1/1/2/3 그대로 두되, 변환 함수가 알아서 처리
-    b = ask_col("분류", -1)
-    d = ask_col("단원", 1)
-    w = ask_col("단어", 2)
-    m = ask_col("뜻",   3)
+    # ✅ 라벨을 더 직관적으로
+    b = ask_col("분류(품사/카테고리)", def_b)
+    d = ask_col("단원(단원/챕터/Day)",  def_d)
+    w = ask_col("단어(영어/English)",   def_w)
+    m = ask_col("뜻(의미/한글/Meaning)", def_m)
 
-    # use_cols는 매핑이 요구하는 최대 열까지 포함되도록 계산
     mapped_max_1based = max([x for x in (b, d, w, m) if isinstance(x, int) and x != -1] + [0])
     use_cols = max(3, mapped_max_1based) if b == -1 else max(4, mapped_max_1based)
 
-    return {
+    schema = {
         "mode": "manual",
         "use_cols": use_cols,
         "header_skip": header_skip,
         "mapping": {"분류": b, "단원": d, "단어": w, "뜻": m}
     }
 
-# 안전한 숫자 추출 함수
-def extract_day_number(x):
-    if pd.isna(x):
-        return None
-    m = re.search(r'\d+', str(x))
-    return int(m.group()) if m else None
+    print("\n[설정 요약]")
+    print(f" 제목줄 스킵: {schema['header_skip']}행")
+    print(f" 매핑(원본 1-based, -1=없음): {schema['mapping']}\n")
+    return schema
 
+# -------------------- 설정 미리보기(저장값 표시 + 예시행) --------------------
+def _get_cell(raw_df, row_idx, col_1based):
+    if col_1based is None or col_1based == -1:
+        return ""
+    c0 = col_1based - 1
+    if not (0 <= row_idx < raw_df.shape[0]) or not (0 <= c0 < raw_df.shape[1]):
+        return ""
+    return normalize_cell(raw_df.iat[row_idx, c0])
+
+def show_saved_schema_with_example(saved, raw_df):
+    """
+    저장된 스키마를 사람이 보기 쉽도록 출력.
+    - 프리뷰 표 출력
+    - header_skip 반영한 '예시 행'(= header_skip 이후 첫 행)을 1줄로 매칭해 보여줌
+    """
+    preview_df(raw_df)  # 컨텍스트용 표
+
+    hs = int(saved.get("header_skip", 1) or 0)
+    row_idx = hs  # 0-based: 헤더를 hs만큼 건너뛴 뒤 첫 데이터 행
+    mp = saved.get("mapping", {})
+    sample = {
+        "분류": _get_cell(raw_df, row_idx, mp.get("분류", -1)),
+        "단원": _get_cell(raw_df, row_idx, mp.get("단원", 1)),
+        "단어": _get_cell(raw_df, row_idx, mp.get("단어", 2)),
+        "뜻":   _get_cell(raw_df, row_idx, mp.get("뜻",   3)),
+    }
+
+    print("[저장된 설정]")
+    print(f" 제목줄 스킵: {hs}행")
+    print(f" 매핑(원본 1-based, -1=없음): {mp}")
+
+    # 예시 행(분류는 -1이거나 값이 비면 생략)
+    parts = []
+    if mp.get("분류", -1) != -1 and sample["분류"] != "":
+        parts.append(f"분류='{sample['분류']}'")
+    parts.append(f"단원='{sample['단원']}'")
+    parts.append(f"단어='{sample['단어']}'")
+    parts.append(f"뜻='{sample['뜻']}'")
+    print(f"[예시 행] (제목줄 {hs}행 스킵 → 미리보기 기준 {hs+1}행)\n")
+    print(" " + " | ".join(parts) + "\n")
+
+# -------------------- 스키마 적용 --------------------
 def apply_schema(raw_df, schema):
     df = raw_df.copy()
 
-    # --- 매핑이 요구하는 최대 열까지 자르도록 수정 (이전 답변에 안내했던 부분) ---
     mp = schema.get("mapping", {"분류": -1, "단원": 1, "단어": 2, "뜻": 3})
     mapped_max = max([v for v in mp.values() if isinstance(v, int) and v != -1] + [0])
     declared_use_cols = schema.get("use_cols", df.shape[1])
     use_cols = max(declared_use_cols, mapped_max)
     df = df.iloc[:, :min(use_cols, df.shape[1])]
 
-    # 헤더 스킵
     skip = schema.get("header_skip", 1)
     if skip > 0 and df.shape[0] > 0:
         df = df.iloc[skip:, :]
 
-    # 1-based -> 0-based 선택
     def pick(col_idx):
         if col_idx == -1:
             return pd.Series([""] * len(df))
@@ -224,41 +256,20 @@ def apply_schema(raw_df, schema):
     for col in ["분류", "단어", "뜻"]:
         out[col] = out[col].apply(normalize_cell)
 
-    # --- 단원 숫자 추출 + 아래로 채우기---
     out["단원"] = out["단원"].apply(extract_day_number).ffill()
-    # 숫자형으로 정리 (비어있으면 NA 유지)
     try:
         out["단원"] = out["단원"].astype("Int64")
     except Exception:
-        # 판다스 버전에 따라 실패할 수 있음 -> 일반 int 캐스팅 시도 (NA가 없다는 가정)
         if out["단원"].isna().any():
             pass
         else:
             out["단원"] = out["단원"].astype(int)
 
-    # --- 내용 없는 줄 제거: 단어/뜻 모두 빈칸이면 드랍 ---
     out = out[~((out["단어"] == "") & (out["뜻"] == ""))].reset_index(drop=True)
-
-    # 카테고리형 유지
     out["분류"] = out["분류"].astype("category")
     return out
 
-
-
-def get_schema_for_file(base_name, raw_df, memo, force_reset=False):
-    if (not force_reset) and base_name in memo:
-        sc = memo[base_name]
-        preview_cols = preview_df(raw_df)
-        print(f"\n[설정 불러옴] {base_name} → {sc['mode']} / use_cols={sc['use_cols']} / header_skip={sc['header_skip']} / mapping={sc['mapping']}")
-        return sc
-
-    print(f"\n[설정 필요] {base_name}")
-    sc = ask_schema_interactively(base_name, raw_df)
-    memo[base_name] = sc
-    save_memory(memo)
-    print("[저장 완료] schema_memory.txt 에 기록했습니다.\n")
-    return sc
-
+# -------------------- 메인 --------------------
 def main():
     files = list_source_files(BASE_DIR_SRC)
     print_file_menu(files)
@@ -278,26 +289,12 @@ def main():
 
             excel_path = os.path.join(BASE_DIR_SRC, files[sel - 1])
             base_name = os.path.splitext(os.path.basename(excel_path))[0]
-
             raw_df = read_raw_sheet(excel_path)
 
-            excel_path = os.path.join(BASE_DIR_SRC, files[sel - 1])
-            base_name = os.path.splitext(os.path.basename(excel_path))[0]
-            raw_df = read_raw_sheet(excel_path)
-
-            # 저장된 설정 확인 → 있으면 먼저 보여주고, 그 다음 재설정 여부 묻기
+            # 저장된 설정 있으면 먼저 보여주고, 사용/재설정 묻기
             saved = memo.get(base_name)
             if saved:
-                
-                # 필요하면 프리뷰도 다시 보여줘서 참고하게
-                _ = preview_df(raw_df)
-
-                print(f"\n[저장된 설정 발견] {base_name}")
-                print(f" mode        : {saved.get('mode')}")
-                print(f" use_cols    : {saved.get('use_cols')}")
-                print(f" header_skip : {saved.get('header_skip')}")
-                print(f" mapping     : {saved.get('mapping')}")
-
+                show_saved_schema_with_example(saved, raw_df)
                 ans = input("저장된 설정을 사용할까요? (엔터=예) / 재설정하려면 'R': ").strip().upper()
                 if ans == "R":
                     print("\n[재설정 진행]")
@@ -308,13 +305,14 @@ def main():
                 else:
                     schema = saved
             else:
-                # 저장된 설정이 없으면 바로 설정 진입
+                # 없으면 바로 설정
                 print(f"\n[처음 사용하는 파일] {base_name} → 설정을 진행합니다.")
                 schema = ask_schema_interactively(base_name, raw_df)
                 memo[base_name] = schema
                 save_memory(memo)
                 print("[저장 완료] schema_memory.txt 에 기록했습니다.\n")
 
+            # DAY 입력
             day_input = input("DAY 번호 입력 (공백 구분, 예: 2 3 또는 4 7): ")
             days = parse_days(day_input)
             if not days:
@@ -325,6 +323,7 @@ def main():
             input("\n[엔터를 눌러 종료합니다]")
             sys.exit(1)
 
+        # 스키마 적용 및 출력
         try:
             df = apply_schema(raw_df, schema)
         except Exception as e:
@@ -340,6 +339,7 @@ def main():
         shuffled_df = filtered_df.sample(frac=1, random_state=None).reset_index(drop=True)
         original_df = shuffled_df.copy()
 
+        # 단어/뜻 중 무작위로 빈칸 만들기
         for idx in range(len(shuffled_df)):
             blank_col = random.choice(['단어', '뜻'])
             shuffled_df.at[idx, blank_col] = ""
